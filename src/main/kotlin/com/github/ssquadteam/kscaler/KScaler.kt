@@ -2,6 +2,7 @@ package com.github.ssquadteam.kscaler
 
 import com.github.ssquadteam.kscaler.internal.Block
 import com.github.ssquadteam.kscaler.internal.Clients
+import com.github.ssquadteam.kscaler.internal.Evidence
 import com.github.ssquadteam.kscaler.internal.Gate
 import com.github.ssquadteam.kscaler.internal.PingChannel
 import com.github.ssquadteam.kscaler.internal.Profiles
@@ -170,6 +171,7 @@ class KScaler(
         }
     }
 
+    @Suppress("CyclomaticComplexMethod", "LongMethod")
     private suspend fun check(
         player: Player,
         redraw: suspend () -> Unit,
@@ -177,34 +179,48 @@ class KScaler(
         val saved = profiles[player.uniqueId] ?: return
         val session = session(player) ?: return
         val started = System.currentTimeMillis()
-        val strength = saved.strength + VERIFY_MARGIN
-        val diffs = ArrayList<Double>()
-        val variances = ArrayList<Double>()
+        var strength = (saved.strength + VERIFY_MARGIN).coerceAtMost(MAX_STRENGTH)
+        val window = (saved.frame * VERIFY_FRAMES).toLong()
+        var match = Evidence(VERIFY_SE)
+        var mismatch = Evidence(VERIFY_SE)
         var frame = saved.frame
         var reading = Reading.UNSURE
-        while (reading == Reading.UNSURE && diffs.size < VERIFY_TRIES && player.isOnline) {
-            if (diffs.isNotEmpty()) delay(SETTLE_MS)
-            val window = (saved.frame * VERIFY_FRAMES).toLong()
+        var tries = 0
+        while (reading == Reading.UNSURE && tries < VERIFY_TRIES && player.isOnline) {
+            if (tries > 0) delay(SETTLE_MS)
+            tries++
             val idle = session.sample(window.coerceIn(VERIFY_IDLE_MS, MAX_WINDOW_MS), 0, Long.MAX_VALUE)
-            player.sendActionBar(marker(color(saved.fit.mismatchSide(), strength)))
-            val on = session.sample(window.coerceIn(VERIFY_ON_MS, MAX_WINDOW_MS), WARMUP_MS, spikeNanos(idle))
-            player.sendActionBar(Component.empty())
-            val a = idle.on(on)
-            val b = on.on(idle)
-            frame = a.center
-            diffs += b.center - a.center
-            variances += a.se * a.se + b.se * b.se
-            val diff = diffs.average()
-            val se = sqrt(variances.average() / diffs.size)
-            reading = decide(diff, se, minDiff(a.center), on.spiked && b.center > a.center)
+            val spike = spikeNanos(idle)
+            val sides = listOf(saved.fit.matchSide(), saved.fit.mismatchSide()).shuffled()
+            for (side in sides) {
+                player.sendActionBar(marker(color(side, strength)))
+                val on = session.sample(window.coerceIn(VERIFY_ON_MS, MAX_WINDOW_MS), WARMUP_MS, spike)
+                player.sendActionBar(Component.empty())
+                delay(SETTLE_MS)
+                (if (side == saved.fit.matchSide()) match else mismatch).add(idle, on)
+                trace(player) { "check ${side.name} strength $strength ${on.on(idle).center - idle.on(on).center}ms over ${idle.on(on).center}ms" }
+            }
+            frame = match.base
+            val minDiff = minDiff(frame)
+            reading =
+                when {
+                    match.slow(minDiff) && mismatch.flat(minDiff) -> Reading.NORMAL
+                    mismatch.slow(minDiff) && match.flat(minDiff) -> Reading.SLOW
+                    else -> Reading.UNSURE
+                }
+            if (reading == Reading.UNSURE && match.flat(minDiff) && mismatch.flat(minDiff) && strength < MAX_STRENGTH) {
+                strength = (strength + COARSE_STEP).coerceAtMost(MAX_STRENGTH)
+                match = Evidence(VERIFY_SE)
+                mismatch = Evidence(VERIFY_SE)
+            }
         }
         val fit = if (reading == Reading.SLOW) saved.fit.other() else saved.fit
-        profiles[player] = saved.copy(fit = fit, frame = frame)
+        profiles[player] = saved.copy(fit = fit, strength = maxOf(saved.strength, strength - VERIFY_MARGIN), frame = frame)
         val kind =
-            when {
-                fit != saved.fit -> ScaleResult.Kind.CHANGED
-                reading == Reading.NORMAL -> ScaleResult.Kind.CONFIRMED
-                else -> ScaleResult.Kind.UNSURE
+            when (reading) {
+                Reading.SLOW -> ScaleResult.Kind.CHANGED
+                Reading.NORMAL -> ScaleResult.Kind.CONFIRMED
+                Reading.UNSURE -> ScaleResult.Kind.UNSURE
             }
         report(player, kind, started)
         if (fit != saved.fit) redraw()
@@ -219,17 +235,12 @@ class KScaler(
             .onFailure { plugin.logger.log(Level.WARNING, "GUI scale result listener failed", it) }
     }
 
-    private fun decide(
-        diff: Double,
-        se: Double,
-        minDiff: Double,
-        spiked: Boolean,
-    ): Reading =
-        when {
-            spiked || (diff >= minDiff && diff >= VERIFY_SE * se) -> Reading.SLOW
-            diff < minDiff -> Reading.NORMAL
-            else -> Reading.UNSURE
-        }
+    private inline fun trace(
+        player: Player,
+        message: () -> String,
+    ) {
+        if (settings.debug) plugin.logger.info("[kScaler] ${player.name} ${message()}")
+    }
 
     @Suppress("CyclomaticComplexMethod", "LongMethod")
     private suspend fun calibrateNow(player: Player): Boolean {
@@ -262,6 +273,7 @@ class KScaler(
                 samples[side.ordinal] = sample
             }
             if (spikedSide != null) {
+                trace(player) { "calibrate strength $strength spiked on ${spikedSide.name}" }
                 strength = maxOf(START_STRENGTH - 2 * COARSE_STEP, strength - COARSE_STEP)
                 fine = true
                 streak = 0
@@ -282,6 +294,7 @@ class KScaler(
                     -d >= minDiff && n.center - floor < minDiff -> -1
                     else -> 0
                 }
+            trace(player) { "calibrate strength $strength narrow ${n.center}ms wide ${w.center}ms floor ${floor}ms sign $sign" }
             if (!fine) {
                 when {
                     sign != 0 && sign == streakSign -> {
@@ -381,6 +394,8 @@ class KScaler(
         NARROW(241),
         WIDE(242),
     }
+
+    private fun Fit.matchSide(): Side = if (this == Fit.NARROW) Side.NARROW else Side.WIDE
 
     private fun Fit.mismatchSide(): Side = if (this == Fit.NARROW) Side.WIDE else Side.NARROW
 

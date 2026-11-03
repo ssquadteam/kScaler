@@ -4,6 +4,7 @@ data class KScalerSettings(
     val threshold: Int = 608,
     val namespace: String = "kscaler",
     val calibrateOnJoin: Boolean = true,
+    val debug: Boolean = false,
 )
 
 data class ScaleResult(
