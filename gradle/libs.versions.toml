@@ -1,0 +1,18 @@
+[versions]
+kotlin = "2.4.10"
+coroutines = "1.11.0"
+paper = "1.21.11-R0.1-SNAPSHOT"
+netty = "4.1.118.Final"
+junit = "5.14.2"
+junit-platform = "1.14.2"
+
+[plugins]
+kotlin-jvm = { id = "org.jetbrains.kotlin.jvm", version.ref = "kotlin" }
+
+[libraries]
+kotlin-stdlib = { module = "org.jetbrains.kotlin:kotlin-stdlib", version.ref = "kotlin" }
+kotlinx-coroutines = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-core", version.ref = "coroutines" }
+paper-api = { module = "io.papermc.paper:paper-api", version.ref = "paper" }
+netty-transport = { module = "io.netty:netty-transport", version.ref = "netty" }
+junit-jupiter = { module = "org.junit.jupiter:junit-jupiter", version.ref = "junit" }
+junit-platform-launcher = { module = "org.junit.platform:junit-platform-launcher", version.ref = "junit-platform" }
